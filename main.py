@@ -404,14 +404,14 @@ class QiuhunPlugin(Star):
 
     # ==================== 道具（求婚专属） ====================
 
-    @filter.command("求婚道具")
+    @filter.command("求婚道具", alias={"使用道具", "道具", "使用"})
     async def use_qiuhun_item(self, event: AstrMessageEvent, item: str = ""):
         """使用求婚道具：/求婚道具 迷魂香|妇人心|悔|相思树下|爱情转移|占有欲"""
         uid = str(event.get_sender_id())
         uname = event.get_sender_name() or f"用户{uid}"
         item = (item or "").strip()
         if item not in ITEMS:
-            yield event.plain_result(f"未知求婚道具。可用：{'、'.join(ITEMS.keys())}\n用法：/求婚道具 <名称>")
+            # 非本插件道具：静默放行（由猜诗句/纵横插件处理）
             return
         group_id = str(event.get_group_id() or "")
         if not group_id or group_id == "None":
