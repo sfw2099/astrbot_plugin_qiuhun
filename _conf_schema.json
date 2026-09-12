@@ -1,0 +1,103 @@
+{
+    "daily_limit": {
+        "type": "int",
+        "description": "每日抽取上限",
+        "hint": "每位用户每天可以抽取老婆的次数上限。",
+        "default": 1
+    },
+    "force_marry_limit": {
+        "type": "int",
+        "description": "每日强娶次数上限",
+        "default": 1
+    },
+    "sever_ties_limit": {
+        "type": "int",
+        "description": "每日斩红尘次数上限",
+        "default": 1
+    },
+    "dian_yuanyang_limit": {
+        "type": "int",
+        "description": "每日点鸳鸯次数上限",
+        "default": 1
+    },
+    "swap_bonds_limit": {
+        "type": "int",
+        "description": "每日换连理次数上限",
+        "default": 1
+    },
+    "recall_past_limit": {
+        "type": "int",
+        "description": "每日忆前世次数上限",
+        "default": 1
+    },
+    "max_records": {
+        "type": "int",
+        "description": "活跃群友记录上限",
+        "hint": "跨群累计活跃用户总记录条数，作为抽老婆的候选池。",
+        "default": 500
+    },
+    "excluded_users": {
+        "type": "list",
+        "description": "排除用户列表",
+        "hint": "在此列表中的QQ号将不会被抽中。",
+        "default": []
+    },
+    "force_marry_excluded_users": {
+        "type": "list",
+        "description": "强娶排除用户列表",
+        "default": []
+    },
+    "whitelist_groups": {
+        "type": "list",
+        "description": "群聊白名单",
+        "default": []
+    },
+    "blacklist_groups": {
+        "type": "list",
+        "description": "群聊黑名单",
+        "default": []
+    },
+    "allow_marry_bot": {
+        "type": "bool",
+        "description": "允许抽中/强娶机器人",
+        "default": false
+    },
+    "auto_set_other_half": {
+        "type": "bool",
+        "description": "自动为被抽中者设置对方为自己的老婆（互为羁绊）",
+        "default": false
+    },
+    "auto_withdraw_enabled": {
+        "type": "bool",
+        "description": "启用自动撤回",
+        "default": false
+    },
+    "auto_withdraw_delay_seconds": {
+        "type": "int",
+        "description": "自动撤回延迟(秒)",
+        "default": 5
+    },
+    "at_waifu": {
+        "type": "bool",
+        "description": "抽中老婆时 @ 对方",
+        "default": false
+    },
+    "keyword_trigger_enabled": {
+        "type": "bool",
+        "title": "启用关键词触发",
+        "description": "开启后，无需 / 前缀，发送关键词即可触发对应指令",
+        "default": false
+    },
+    "keyword_trigger_mode": {
+        "type": "string",
+        "title": "关键词匹配模式",
+        "description": "exact=完全匹配 / starts_with=前缀匹配 / contains=包含匹配",
+        "options": ["exact", "starts_with", "contains"],
+        "default": "contains"
+    },
+    "iterations": {
+        "type": "int",
+        "description": "关系图力学迭代次数",
+        "default": 140
+    }
+}
