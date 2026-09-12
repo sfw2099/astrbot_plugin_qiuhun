@@ -103,6 +103,10 @@ class ProfileManager:
         self.save_profile(proposer_id, profile)
         return profile, 0, []
 
+    def can_propose(self, user_id: str):
+        """求婚前置检查。返回 (可求婚, 羁绊占位, 拦截消息)。与原版语义一致：始终可求婚。"""
+        return True, 0, ""
+
     def record_propose_accepted(self, context, bond_link, proposer_id: str, target_id: str):
         """求婚成功：双方羁绊 +5（bond 走秋烨），married_to 双向记录。"""
         proposer = self.get_profile(proposer_id)
