@@ -21,6 +21,10 @@ DEFAULT_PROFILE = {
     "wife_draw_count_today": 0,
     "draw_date": "",
     "last_propose_date": "",
+    "charm_next": False,        # 迷魂香：下一次求婚对方自动同意
+    "possessive_date": "",      # 占有欲：生效日期（当天双向封锁）
+    "propose_free": False,      # 痴心不改：本次求婚不耗每日次数（已移除该道具则无效果）
+    "love_transfer_date": "",   # 爱情转移：生效日期（当日一次，被非求婚手段连羁绊时转移）
 }
 
 
@@ -77,6 +81,10 @@ class ProfileManager:
             profile["proposed_today"] = False
             profile["proposed_to_today"] = None
             profile["last_propose_date"] = today
+            changed = True
+        # 占有欲为当日效果：跨天清除
+        if profile.get("possessive_date") and profile.get("possessive_date") != today:
+            profile["possessive_date"] = ""
             changed = True
         if changed:
             self.save_profile(user_id, profile)

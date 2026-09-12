@@ -20,6 +20,9 @@ from .hub_link import BondLink, ActivePoolLink, get_hub, record_plugin_use
 from .profiles import ProfileManager
 from .propose import cmd_propose, handle_propose_response
 from .image_utils import render_couple, render_grid, render_relationship_graph, _init_temp
+from .bond_stats import BondStats
+from .lovesick import LovesickStore
+from .manifest import ITEMS
 from .utils import (
     load_json,
     save_json,
@@ -85,6 +88,8 @@ class QiuhunPlugin(Star):
         self._profile_manager = ProfileManager(self.profiles_dir)
         self._bond_link = BondLink(os.path.join(self.data_dir, "bond_fallback.json"))
         self._active_pool = ActivePoolLink(os.path.join(str(StarTools.get_data_dir("astrbot_plugin_qiuye"))))
+        self._bond_stats = BondStats(os.path.join(self.data_dir, "bond_stats.json"))
+        self._lovesick = LovesickStore(os.path.join(self.data_dir, "lovesick.json"))
 
         self._keyword_router = KeywordRouter(routes=_DEFAULT_KEYWORD_ROUTES)
         self._keyword_handlers = {
@@ -102,7 +107,65 @@ class QiuhunPlugin(Star):
         }
         self._keyword_trigger_block_prefixes = ("/", "!", "！")
         _init_temp(os.path.join(self.data_dir, "temp"))
+        # 启动时向秋烨注册成就/道具清单
+        self._register_manifest()
         logger.info(f"[qiuhun] 求婚插件已加载。数据目录: {self.data_dir}")
+
+    def _register_manifest(self):
+        hub = get_hub(self.context)
+        if hub is None:
+            return False
+        try:
+            from .manifest import ACHIEVEMENTS, ITEMS
+            hub.register_achievements("astrbot_plugin_qiuhun", ACHIEVEMENTS)
+            hub.register_items("astrbot_plugin_qiuhun", ITEMS)
+            return True
+        except Exception as e:
+            logger.warning(f"[qiuhun] 秋烨注册失败: {e}")
+            return False
+
+    def _check_achievement(self, uid, ach_id, progress=None):
+        """解锁/推进求婚成就（经秋烨）。progress 为 None 时一次性解锁。返回是否新解锁/更新。"""
+        hub = get_hub(self.context)
+        if hub is None:
+            return False
+        try:
+            name = self._uid_name(uid)
+            if progress is not None:
+                # 升级制：progress 为实际累计数，直接覆盖（unlocked 状态）
+                u = hub.get_user(str(uid), name)
+                achs = u.setdefault("achievements", {})
+                from . import manifest as _m
+                cur = achs.get(ach_id, {})
+                new_progress = int(progress)
+                if cur.get("unlocked") and cur.get("progress") == new_progress:
+                    return False
+                achs[ach_id] = {
+                    "unlocked": new_progress > 0,
+                    "time": cur.get("time", __import__("time").time()),
+                    "progress": new_progress,
+                    "plugin": "astrbot_plugin_qiuhun",
+                }
+                hub.store.save_user(str(uid), u)
+                return True
+            return bool(hub.unlock_achievement(uid, ach_id, plugin="astrbot_plugin_qiuhun", name=name))
+        except Exception as e:
+            logger.warning(f"[qiuhun] 成就解锁失败 {ach_id}: {e}")
+            return False
+
+    def _achieve_msg_by_id(self, uid, ach_id, progress=None):
+        """生成求婚成就解锁提示（含升级制 ·x 后缀）。"""
+        from .manifest import ACHIEVEMENTS, cut_name, sever_name, matchmaker_name, swap_name
+        base = ACHIEVEMENTS.get(ach_id, (ach_id, ""))[0]
+        if ach_id == "cut_x" and progress:
+            base = cut_name(progress)
+        elif ach_id == "sever_x" and progress:
+            base = sever_name(progress)
+        elif ach_id == "matchmaker_x" and progress:
+            base = matchmaker_name(progress)
+        elif ach_id == "swap_x" and progress:
+            base = swap_name(progress)
+        return f"🏆 {self._uid_name(uid)} 达成成就「{base}」！"
 
     # ==================== 基础设施 ====================
 
@@ -310,8 +373,15 @@ class QiuhunPlugin(Star):
             enabled=self._auto_set_other_half_enabled(), timestamp=timestamp,
         )
         save_json(self._today_records_path(), self.records)
+        # 钩子：占有欲/爱情转移（抽老婆属于非求婚手段）
+        try:
+            extra_msgs = await self._post_bond_hooks(event, group_id, user_id, [wife_id], crit_success=False)
+        except Exception:
+            extra_msgs = []
         avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={wife_id}&spec=640"
         suffix_text = f"\n请好好对待她哦❤️~\n剩余抽取次数：{max(0, daily_limit - today_count - 1)}次"
+        for m in extra_msgs:
+            suffix_text += "\n" + m
         at_waifu_enabled = self.config.get("at_waifu", False)
         if self._can_onebot_withdraw(event):
             msg_list = [
@@ -331,6 +401,121 @@ class QiuhunPlugin(Star):
             chain.append(Comp.At(qq=wife_id))
         chain.extend([Comp.Image.fromURL(avatar_url), Comp.Plain(suffix_text)])
         yield event.chain_result(chain)
+
+    # ==================== 道具（求婚专属） ====================
+
+    @filter.command("求婚道具")
+    async def use_qiuhun_item(self, event: AstrMessageEvent, item: str = ""):
+        """使用求婚道具：/求婚道具 迷魂香|妇人心|悔|相思树下|爱情转移|占有欲"""
+        uid = str(event.get_sender_id())
+        uname = event.get_sender_name() or f"用户{uid}"
+        item = (item or "").strip()
+        if item not in ITEMS:
+            yield event.plain_result(f"未知求婚道具。可用：{'、'.join(ITEMS.keys())}\n用法：/求婚道具 <名称>")
+            return
+        group_id = str(event.get_group_id() or "")
+        if not group_id or group_id == "None":
+            yield event.plain_result("求婚道具仅在群聊中使用。")
+            return
+        if self.pm.item_count(uid, item, uname) <= 0:
+            yield event.plain_result(f"道具【{item}】数量不足（可在 /我的背包 查看）。")
+            return
+        profile = self._get_profile(uid)
+        self._profile_manager.ensure_daily_reset(uid, profile)
+
+        if item == "迷魂香":
+            profile["charm_next"] = True
+            self._profile_manager.save_profile(uid, profile)
+            self.pm.consume_item(uid, item, 1, uname)
+            yield event.plain_result("💘 【迷魂香】发动！你的下一次求婚对方将自动同意。")
+            return
+
+        if item == "占有欲":
+            today = datetime.now().strftime("%Y%m%d")
+            profile["possessive_date"] = today
+            self._profile_manager.save_profile(uid, profile)
+            # 双向封锁：自己的羁绊对象也标记
+            group_records = self._get_group_records(group_id)
+            partners = {r.get("wife_id") for r in group_records if r.get("user_id") == uid and "type" not in r}
+            locked = [uid]
+            for pid in partners:
+                if pid:
+                    pp = self._get_profile(pid)
+                    pp["possessive_date"] = today
+                    self._profile_manager.save_profile(pid, pp)
+                    locked.append(pid)
+            self.pm.consume_item(uid, item, 1, uname)
+            names = "、".join(f"用户{x}" for x in locked)
+            yield event.plain_result(f"🔒 【占有欲】发动！{names} 今天都无法再和他人产生新的羁绊连线。")
+            return
+
+        # 以下道具都需要先收集自己的羁绊线
+        group_records = self._get_group_records(group_id)
+        my_bonds = [r for r in group_records if r.get("user_id") == uid and "type" not in r]
+        if not my_bonds:
+            yield event.plain_result("你今天没有任何羁绊连线，无需使用该道具。")
+            return
+
+        if item == "妇人心":
+            n = len(my_bonds)
+            group_records[:] = [r for r in group_records if not (r.get("user_id") == uid and "type" not in r)
+                                and not (r.get("wife_id") == uid and r.get("user_id") in {b.get("user_id") for b in my_bonds} and "type" not in r)]
+            # 同时清除互为对方的连线（对方→自己）
+            group_records[:] = [r for r in group_records if "type" in r or r.get("user_id") != uid]
+            self._profile_manager.update_yesterday_propose(uid, None)
+            save_json(self._today_records_path(), self.records)
+            self.pm.consume_item(uid, item, 1, uname)
+            # 等量随机道具
+            got = []
+            for _ in range(n):
+                it = random.choice(list(ITEMS.keys()) + ["火眼金睛", "三仙归洞", "仙人指路", "探囊取物", "招灾", "解难", "文字狱", "红杏出墙"])
+                self.pm.add_item(uid, it, 1, uname)
+                got.append(it)
+            yield event.plain_result(
+                f"💔 【妇人心】发动！斩断了 {n} 条羁绊线，化作 {n} 份道具：\n"
+                + "\n".join(f"· 【{x}】x1" for x in got)
+            )
+            return
+
+        if item == "悔":
+            first = my_bonds[0]
+            # 保留第一条，清除其余
+            keep_key = (first.get("user_id"), first.get("wife_id"))
+            group_records[:] = [r for r in group_records
+                                if "type" in r or (r.get("user_id"), r.get("wife_id")) == keep_key
+                                or not (r.get("user_id") == uid and "type" not in r)]
+            # 简化：只保留 uid 的第一条连线，其余自己的连线删除
+            group_records = self._get_group_records(group_id)
+            kept = False
+            new_records = []
+            for r in group_records:
+                if "type" in r:
+                    new_records.append(r)
+                    continue
+                if r.get("user_id") == uid:
+                    if not kept:
+                        new_records.append(r)
+                        kept = True
+                    continue
+                new_records.append(r)
+            group_records[:] = new_records
+            save_json(self._today_records_path(), self.records)
+            self.pm.consume_item(uid, item, 1, uname)
+            yield event.plain_result(
+                f"😢 【悔】发动！斩断了 {len(my_bonds) - 1} 条羁绊线，仅保留了今天第一段缘分："
+                f"【{first.get('wife_name', first.get('wife_id'))}】"
+            )
+            return
+
+        if item == "相思树下":
+            self._lovesick.save_bonds(uid, my_bonds)
+            group_records[:] = [r for r in group_records if "type" in r or r.get("user_id") != uid]
+            save_json(self._today_records_path(), self.records)
+            self.pm.consume_item(uid, item, 1, uname)
+            yield event.plain_result(
+                f"🌳 【相思树下】发动！{len(my_bonds)} 条羁绊线已被封存于相思树下（共 {self._lovesick.count(uid)} 条），静待有缘人。"
+            )
+            return
 
     # ==================== 我的老婆 ====================
 
@@ -401,6 +586,13 @@ class QiuhunPlugin(Star):
             yield event.plain_result("不能娶自己！")
             return
 
+        # 占有欲：目标被锁定（双向封锁）时拦截
+        if target_id and not is_all_target:
+            t_profile = self._get_profile(target_id)
+            if t_profile.get("possessive_date") == datetime.now().strftime("%Y%m%d"):
+                yield event.plain_result("💔 对方已被【占有欲】锁定，今天无法与他人结为新羁绊。")
+                return
+
         force_excluded = self._force_marry_excluded_users()
         if not self.config.get("allow_marry_bot", False):
             force_excluded.add(bot_id)
@@ -431,6 +623,9 @@ class QiuhunPlugin(Star):
             force_count_after = len([r for r in group_records if r["user_id"] == user_id and r.get("type") == "force_marry"])
             suffix = f"\n剩余强娶次数：{max(0, force_marry_limit - force_count_after)}次"
             text = f"🌟 大成功！{dice_text}\n全体强娶成功！后宫+{new_count}位群友~{suffix}"
+            extra_msgs = await self._post_bond_hooks(event, group_id, user_id, new_qqs, crit_success=True)
+            for m in extra_msgs:
+                text += "\n" + m
             grid_url = await render_grid(self, new_qqs)
             if self._can_onebot_withdraw(event):
                 message_id = await send_onebot_message(event, message=[{"type": "at", "data": {"qq": user_id}}, {"type": "text", "data": {"text": text}}, {"type": "image", "data": {"file": grid_url}}])
@@ -506,15 +701,79 @@ class QiuhunPlugin(Star):
         maybe_add_other_half_record(records=group_records, user_id=user_id, user_name=user_name, wife_id=target_id, wife_name=target_name, enabled=self._auto_set_other_half_enabled(), timestamp=timestamp)
         group_records.append({"user_id": user_id, "type": "force_marry", "success": True, "timestamp": datetime.now().isoformat()})
         save_json(self._today_records_path(), self.records)
+        # 成就：月老也疯狂（大成功）；后宫佳丽三千；爱情转移
+        extra_msgs = await self._post_bond_hooks(event, group_id, user_id, [target_id], crit_success=bool(result.get("is_crit_success")))
         avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={target_id}&spec=640"
         suffix = f"\n剩余强娶次数：{max(0, force_marry_limit - force_count - 1)}次"
         text = f"强娶成功！{dice_text}\n娶到了【{target_name}】！{suffix}"
+        for m in extra_msgs:
+            text += "\n" + m
         if self._can_onebot_withdraw(event):
             message_id = await send_onebot_message(event, message=[{"type": "at", "data": {"qq": user_id}}, {"type": "text", "data": {"text": text}}, {"type": "image", "data": {"file": avatar_url}}])
             if message_id is not None:
                 self._schedule_onebot_delete_msg(event.bot, message_id=message_id)
             return
         yield event.chain_result([Comp.At(qq=user_id), Comp.Plain(text), Comp.Image.fromURL(avatar_url)])
+
+    async def _post_bond_hooks(self, event, group_id, actor_id, bonded_ids, crit_success=False):
+        """连羁绊成功后的公共钩子：成就（月老也疯狂/后宫佳丽三千）+ 爱情转移。
+        返回附加消息列表（文本）。"""
+        msgs = []
+        # 月老也疯狂：强娶大成功
+        if crit_success:
+            if self._check_achievement(actor_id, "force_crit"):
+                msgs.append(self._achieve_msg_by_id(actor_id, "force_crit"))
+        # 后宫佳丽三千：同时拥有 ≥10 条连线
+        group_records = self._get_group_records(group_id)
+        my_bonds = len([r for r in group_records if r.get("user_id") == actor_id and "type" not in r])
+        if my_bonds >= 10:
+            if self._check_achievement(actor_id, "love_collector"):
+                msgs.append(self._achieve_msg_by_id(actor_id, "love_collector"))
+        # 爱情转移：被连者若标记爱情转移，转移给群里另一人
+        transfer = await self._love_transfer_check(event, group_id, bonded_ids, actor_id, "强娶")
+        msgs.extend(transfer)
+        return msgs
+
+    async def _love_transfer_check(self, event, group_id, bonded_ids, actor_id, source):
+        """爱情转移：检查被连者是否标记爱情转移（当日），有则把这条新连线随机转给群里另一人。
+        返回消息列表。"""
+        msgs = []
+        today = datetime.now().strftime("%Y%m%d")
+        members = await get_group_members(event)
+        member_ids = [str(m.get("user_id")) for m in members] if members else []
+        group_records = self._get_group_records(group_id)
+        for tid in bonded_ids:
+            t_profile = self._get_profile(tid)
+            if not t_profile.get("love_transfer_date") or t_profile.get("love_transfer_date") != today:
+                continue
+            # 随机选一个非当事人群友接手
+            candidates = [u for u in member_ids
+                          if u not in (str(tid), str(actor_id), "0")
+                          and u not in {r.get("wife_id") for r in group_records if r.get("user_id") == u and "type" not in r}]
+            if not candidates:
+                continue
+            new_owner = random.choice(candidates)
+            new_owner_name = f"用户({new_owner})"
+            for m in members:
+                if str(m.get("user_id")) == new_owner:
+                    new_owner_name = m.get("card") or m.get("nickname") or new_owner_name
+            # 转移：把 actor→tid 的连线改为 actor→new_owner（双向）
+            timestamp = datetime.now().isoformat()
+            actor_name = self._uid_name(actor_id)
+            tid_name = self._uid_name(tid)
+            group_records = [r for r in group_records
+                             if not (r.get("user_id") == actor_id and r.get("wife_id") == tid
+                                     and r.get("timestamp", "").startswith(timestamp[:16]))]
+            group_records = self._get_group_records(group_id)
+            # 简化转移：新增 actor↔new_owner 双向连线（原连线保留，视为缘分分身）
+            group_records.append({"user_id": new_owner, "wife_id": actor_id, "wife_name": actor_name, "timestamp": timestamp, "love_transfer": True})
+            group_records.append({"user_id": actor_id, "wife_id": new_owner, "wife_name": new_owner_name, "timestamp": timestamp, "love_transfer": True})
+            save_json(self._today_records_path(), self.records)
+            msgs.append(f"💘 【爱情转移】{tid_name} 发动了爱情转移！这份来自【{source}】的缘分转移给了 {new_owner_name}~")
+            # 清除一次性标记
+            t_profile["love_transfer_date"] = ""
+            self._profile_manager.save_profile(tid, t_profile)
+        return msgs
 
     async def _force_all_common(self, event, group_id, user_id, force_excluded):
         """全体强娶公共部分：取活跃池并写入婚姻记录。返回 (members, new_count, new_qqs, user_name)。"""
@@ -634,6 +893,13 @@ class QiuhunPlugin(Star):
             group_records[:] = [r for r in group_records if "type" in r]
             group_records.append({"user_id": user_id, "type": "sever_ties", "success": True, "timestamp": datetime.now().isoformat()})
             save_json(self._today_records_path(), self.records)
+            # 成就：主动斩 +n（多情剑客无情剑·x）
+            try:
+                total = self._bond_stats.add_sever(user_id, n)
+                if self._check_achievement(user_id, "sever_x", progress=total):
+                    yield event.plain_result(self._achieve_msg_by_id(user_id, "sever_x", total))
+            except Exception:
+                pass
             yield event.plain_result(f"🌟 大成功！{dice_text}\n{user_name} 一剑斩断全群红尘！已清除本群所有羁绊连线（共 {n} 条）。")
             return
 
@@ -646,6 +912,16 @@ class QiuhunPlugin(Star):
             group_records[:] = [r for r in group_records if (r["user_id"] != target_uid and r.get("wife_id") != target_uid) or "type" in r]
             group_records.append({"user_id": user_id, "type": "sever_ties", "success": True, "timestamp": datetime.now().isoformat()})
             save_json(self._today_records_path(), self.records)
+            # 成就：主动斩 +n、被斩 +n
+            try:
+                total_s = self._bond_stats.add_sever(user_id, n)
+                if self._check_achievement(user_id, "sever_x", progress=total_s):
+                    yield event.plain_result(self._achieve_msg_by_id(user_id, "sever_x", total_s))
+                total_c = self._bond_stats.add_cut(target_uid, n)
+                if self._check_achievement(target_uid, "cut_x", progress=total_c):
+                    yield event.plain_result(self._achieve_msg_by_id(target_uid, "cut_x", total_c))
+            except Exception:
+                pass
             yield event.plain_result(f"⚔️ {user_name} 挥剑斩断 {target_name} 的红尘！{dice_text}\n已清除 {target_name} 今日所有羁绊连线（共 {n} 条）。")
             return
 
@@ -653,6 +929,13 @@ class QiuhunPlugin(Star):
         group_records[:] = [r for r in group_records if (r["user_id"] != user_id and r.get("wife_id") != user_id) or "type" in r]
         group_records.append({"user_id": user_id, "type": "sever_ties", "success": True, "timestamp": datetime.now().isoformat()})
         save_json(self._today_records_path(), self.records)
+        # 成就：主动斩 +n（自斩）
+        try:
+            total_s = self._bond_stats.add_sever(user_id, n)
+            if self._check_achievement(user_id, "sever_x", progress=total_s):
+                yield event.plain_result(self._achieve_msg_by_id(user_id, "sever_x", total_s))
+        except Exception:
+            pass
         yield event.plain_result(f"⚔️ {user_name} 斩断红尘！{dice_text}\n已清除你今日所有羁绊连线（共 {n} 条）。")
 
     # ==================== 点鸳鸯 ====================
@@ -777,11 +1060,24 @@ class QiuhunPlugin(Star):
 
         save_json(self._today_records_path(), self.records)
 
+        # 成就：红线仙·x（点鸳鸯累计成功）
+        ach_msgs = []
+        try:
+            total = self._bond_stats.add_matchmaker(user_id)
+            if self._check_achievement(user_id, "matchmaker_x", progress=total):
+                ach_msgs.append(self._achieve_msg_by_id(user_id, "matchmaker_x", total))
+        except Exception:
+            pass
+        # 爱情转移：目标若标记了爱情转移，随机转给群里另一人
+        transfer_msgs = await self._love_transfer_check(event, group_id, [target_a, target_b], user_id, "点鸳鸯")
+
         couple_url = await render_couple(self, target_a, target_b, target_a_name, target_b_name)
 
         crit_msg = "🌟 大成功！" if result.get("is_crit_success") else ""
         suffix = f"\n剩余牵线次数：{max(0, dian_limit - dian_count - 1)}次"
         text = f"{crit_msg}🎊 {user_name} 为 {target_a_name} 和 {target_b_name} 牵线成功！{dice_text}\n喜结连理，百年好合❤️{suffix}"
+        for m in ach_msgs + transfer_msgs:
+            text += "\n" + m
         if self._can_onebot_withdraw(event):
             message_id = await send_onebot_message(event, message=[{"type": "at", "data": {"qq": user_id}}, {"type": "text", "data": {"text": text}}, {"type": "image", "data": {"file": couple_url}}])
             if message_id is not None:
@@ -883,6 +1179,13 @@ class QiuhunPlugin(Star):
 
         crit_msg = "🌟 大成功！" if result.get("is_crit_success") else ""
         suffix = f"\n剩余换连理次数：{max(0, swap_bonds_limit - swap_count - 1)}次"
+        # 成就：移花接木·x（换连理累计成功）
+        try:
+            total = self._bond_stats.add_swap(user_id)
+            if self._check_achievement(user_id, "swap_x", progress=total):
+                yield event.plain_result(self._achieve_msg_by_id(user_id, "swap_x", total))
+        except Exception:
+            pass
         yield event.plain_result(f"{crit_msg}🎭 {user_name} 与目标交换了所有羁绊！{dice_text}{suffix}")
 
     # ==================== 忆前世 ====================
@@ -989,6 +1292,11 @@ class QiuhunPlugin(Star):
 
         group_records.append({"user_id": user_id, "type": "recall_past", "success": True, "timestamp": timestamp})
         save_json(self._today_records_path(), self.records)
+
+        # 成就：孤芳自赏（追忆 0 条）
+        if copied == 0:
+            if self._check_achievement(user_id, "forever_alone"):
+                yield event.plain_result(self._achieve_msg_by_id(user_id, "forever_alone"))
 
         crit_msg = "🌟 大成功！" if result.get("is_crit_success") else ""
         suffix = f"\n剩余忆前世次数：{max(0, recall_past_limit - len(recall_recs) - 1)}次"

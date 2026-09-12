@@ -11,6 +11,7 @@ from astrbot.api import logger
 
 from .utils import save_json, extract_target_id_from_message, resolve_member_name, get_group_members
 from .image_utils import render_couple
+from astrbot.api import logger
 
 propose_requests = {}
 
@@ -43,6 +44,32 @@ async def cmd_propose(plugin_instance, event: AstrMessageEvent):
 
     if not is_all_target:
         _ = plugin_instance._get_profile(target_id)
+        # 占有欲：目标被他人占有（双向封锁）时拦截
+        t_profile = plugin_instance._get_profile(target_id)
+        if t_profile.get("possessive_date"):
+            from datetime import datetime as _dt
+            if t_profile["possessive_date"] == _dt.now().strftime("%Y%m%d"):
+                yield event.plain_result("💔 对方已被【占有欲】锁定，今天无法与他人结为新羁绊。")
+                return
+        # 迷魂香：求婚者若有迷魂香标记 → 立即自动同意
+        p_profile = plugin_instance._get_profile(user_id)
+        if p_profile.get("charm_next"):
+            p_profile["charm_next"] = False
+            plugin_instance._profile_manager.save_profile(user_id, p_profile)
+            fake_req = {
+                "proposer_id": user_id,
+                "proposer_name": event.get_sender_name() or f"用户({user_id})",
+                "target_id": target_id,
+                "target_name": f"用户({target_id})",
+                "expire": time.time() + 60,
+                "umo": event.unified_msg_origin,
+                "is_all_target": False,
+            }
+            plugin_instance._profile_manager.record_propose(user_id, target_id)
+            plugin_instance._bond_stats.reset_no_reply(user_id)
+            async for result in _accept_proposal(plugin_instance, event, group_id, target_id, fake_req):
+                yield result
+            return
 
     plugin_instance._profile_manager.record_propose(
         user_id, target_id if not is_all_target else "__all__"
@@ -86,6 +113,12 @@ async def cmd_propose(plugin_instance, event: AstrMessageEvent):
             else:
                 plugin_instance._profile_manager.update_yesterday_propose(user_id, target_id)
 
+            # 知我相思苦：求婚无人回应，连击 +1
+            try:
+                plugin_instance._bond_stats.record_no_reply(user_id)
+            except Exception:
+                pass
+
             chain_obj = MessageChain()
             components = [
                 Comp.At(qq=user_id),
@@ -108,10 +141,14 @@ async def handle_propose_response(plugin_instance, event: AstrMessageEvent):
     if group_id not in propose_requests:
         return
 
+    now = time.time()
+
+    # 迷魂香：目标若使用过迷魂香，任意回复（含非"同意"文本）自动同意；
+    # 且无需主动回复——由 cmd_propose 侧的延时任务自动促成（见 cmd_propose 尾部）。
+    # 此处保留手动同意路径。
+
     if msg not in ["同意求婚", "我同意", "同意"]:
         return
-
-    now = time.time()
 
     target_matches = []
     all_matches = []
@@ -159,6 +196,20 @@ async def _accept_proposal(plugin_instance, event, group_id, accepter_id, req):
     plugin_instance._profile_manager.record_propose_accepted(
         plugin_instance.context, plugin_instance._bond_link, proposer_id, accepter_id
     )
+
+    # 三生三世：双方记录今天结为夫妻（连续天数）
+    try:
+        for uid in (proposer_id, accepter_id):
+            streak = plugin_instance._bond_stats.record_marry(uid)
+            if streak >= 3:
+                plugin_instance._check_achievement(uid, "sanshengsanshi")
+    except Exception:
+        pass
+    # 求婚成功：无回应连击清零
+    try:
+        plugin_instance._bond_stats.reset_no_reply(proposer_id)
+    except Exception:
+        pass
 
     is_all = req.get("is_all_target", False)
     if not is_all:
