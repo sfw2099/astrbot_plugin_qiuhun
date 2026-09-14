@@ -107,6 +107,9 @@ class QiuhunPlugin(Star):
         }
         self._keyword_trigger_block_prefixes = ("/", "!", "！")
         _init_temp(os.path.join(self.data_dir, "temp"))
+        # 道具桥接层（走秋烨统一背包）
+        from .store_bridge import StoreBridge
+        self.pm = StoreBridge(context)
         # 启动时向秋烨注册成就/道具清单
         self._register_manifest()
         logger.info(f"[qiuhun] 求婚插件已加载。数据目录: {self.data_dir}")
@@ -254,6 +257,12 @@ class QiuhunPlugin(Star):
 
     # ==================== 消息监听 ====================
 
+    # 关键词路由误命中保护：这些消息是更长的命令/词组，contains 匹配不应触发
+    _KEYWORD_EXCLUDE_PHRASES = (
+        "求婚道具", "强娶道具", "斩红尘道具", "点鸳鸯道具", "换连理道具",
+        "忆前世道具", "抽老婆道具",
+    )
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def keyword_trigger(self, event: AstrMessageEvent):
         if not self.config.get("keyword_trigger_enabled", False):
@@ -264,6 +273,9 @@ class QiuhunPlugin(Star):
         if event.is_at_or_wake_command:
             return
         if message_str.startswith(self._keyword_trigger_block_prefixes):
+            return
+        # 排除"XX道具"等复合词被单关键词（如"求婚"）误命中
+        if any(phrase in message_str for phrase in self._KEYWORD_EXCLUDE_PHRASES):
             return
         mode = self._get_keyword_trigger_mode()
         route = self._keyword_router.match_route(message_str, mode=mode)
